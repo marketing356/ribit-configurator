@@ -20,6 +20,8 @@ export interface BoatConfig {
   type: 'hybrid' | 'classic';
   description: string;
   hullGlb: string;
+  /** Set to true to hide from the UI selector (e.g. placeholder/WIP models) */
+  hidden?: boolean;
   specs: {
     length: string;
     beam: string;
@@ -175,6 +177,8 @@ export const BOAT_CONFIGS: BoatConfig[] = [
     type: 'classic',
     description: 'Patrol Series — AI-generated preview model. 20ft tactical patrol RIB.',
     hullGlb: '/models/patrol_p600_meshy.glb',
+    // Hidden until a proper P600 model with normals/materials is ready
+    hidden: true,
     specs: {
       length: '20 ft (6.0m)',
       beam: '8.2 ft (2.5m)',

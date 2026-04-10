@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useCallback } from 'react';
+import { Suspense, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, useGLTF, ContactShadows, useProgress } from '@react-three/drei';
 import * as THREE from 'three';
@@ -9,14 +9,14 @@ import { BuildOptions } from '@/lib/boatConfig';
 // ─── Color resolution ────────────────────────────────────────────────────────
 
 const HEX_MAP: Record<string, string> = {
-  white: '#F5F5F5',
-  black: '#1A1A1A',
-  gray: '#808080',
-  navy: '#1B2A4A',
-  red: '#CC2222',
-  deepNavy: '#0D1B35',
-  brownBlack: '#3D2B1F',
-  blue: '#1E4080',
+  white:     '#F5F5F5',
+  black:     '#1A1A1A',
+  gray:      '#808080',
+  navy:      '#1B2A4A',
+  red:       '#CC2222',
+  deepNavy:  '#0D1B35',
+  brownBlack:'#3D2B1F',
+  blue:      '#1E4080',
 };
 
 function resolveHex(color: string): string {
@@ -25,10 +25,17 @@ function resolveHex(color: string): string {
 
 // ─── Material helpers ────────────────────────────────────────────────────────
 
-/** Set color on any material that has a .color property */
 function setMeshColor(mesh: THREE.Mesh, hex: string) {
   const applyToMat = (mat: THREE.Material) => {
-    if ('color' in mat) {
+    if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhongMaterial) {
+      const m = mat as THREE.MeshStandardMaterial;
+      m.color.set(hex);
+      // Strip any baked textures that would fight the chosen color
+      m.map = null;
+      m.emissiveMap = null;
+      m.emissive.set('#000000');
+      m.needsUpdate = true;
+    } else if ('color' in mat) {
       (mat as THREE.MeshStandardMaterial).color.set(hex);
       mat.needsUpdate = true;
     }
@@ -42,8 +49,6 @@ function setMeshColor(mesh: THREE.Mesh, hex: string) {
 
 /**
  * Clone a scene AND deep-clone every material so mutations are isolated.
- * Without this, multiple components share the same material instances and
- * color changes on one affect the others.
  */
 function cloneSceneWithMaterials(scene: THREE.Object3D): THREE.Object3D {
   const clone = scene.clone();
@@ -59,13 +64,22 @@ function cloneSceneWithMaterials(scene: THREE.Object3D): THREE.Object3D {
   return clone;
 }
 
+// ─── Bounding-box helpers ────────────────────────────────────────────────────
+
+/** Compute a world-space Box3 for a cloned scene after it's been positioned. */
+function getBox3(object: THREE.Object3D): THREE.Box3 {
+  const box = new THREE.Box3();
+  box.setFromObject(object);
+  return box;
+}
+
 // ─── Keyword sets for mesh identification ────────────────────────────────────
 
-const TUBE_KW    = ['tube', 'inflatable', 'collar', 'pontoon', 'fender', 'float', 'buoy'];
-const EVA_KW     = ['eva', 'mat', 'foam', 'deck_pad', 'floor_pad', 'decking', 'traction'];
-const SEAT_IN_KW = ['seat_inner', 'cushion_inside', 'inside_seat', 'seat_in'];
-const SEAT_OUT_KW= ['seat_outer', 'cushion_outside', 'outside_seat', 'seat_out'];
-const SEAT_KW    = ['seat', 'cushion', 'bench', 'bolster'];
+const TUBE_KW     = ['tube', 'inflatable', 'collar', 'pontoon', 'fender', 'float', 'buoy'];
+const EVA_KW      = ['eva', 'mat', 'foam', 'deck_pad', 'floor_pad', 'decking', 'traction'];
+const SEAT_IN_KW  = ['seat_inner', 'cushion_inside', 'inside_seat', 'seat_in'];
+const SEAT_OUT_KW = ['seat_outer', 'cushion_outside', 'outside_seat', 'seat_out'];
+const SEAT_KW     = ['seat', 'cushion', 'bench', 'bolster'];
 
 function matchesAny(name: string, keywords: string[]): boolean {
   return keywords.some((k) => name.includes(k));
@@ -73,9 +87,8 @@ function matchesAny(name: string, keywords: string[]): boolean {
 
 /**
  * Apply all build colors to a scene object.
- * Strategy: hull powder coat is the DEFAULT — applied to anything that doesn't
- * match a more specific category.  This guarantees the boat always has color
- * even if the GLB mesh names don't follow any naming convention.
+ * Hull powder coat is the default — applied to anything that doesn't match a
+ * more specific category.
  */
 function applyBuildColors(object: THREE.Object3D, build: BuildOptions) {
   const powderHex    = resolveHex(build.powderCoat);
@@ -97,7 +110,6 @@ function applyBuildColors(object: THREE.Object3D, build: BuildOptions) {
     } else if (matchesAny(name, SEAT_KW)) {
       setMeshColor(child, innerSeatHex);
     } else {
-      // Default: apply hull/frame powder coat color to everything else
       setMeshColor(child, powderHex);
     }
   });
@@ -105,52 +117,124 @@ function applyBuildColors(object: THREE.Object3D, build: BuildOptions) {
 
 // ─── Scene components ────────────────────────────────────────────────────────
 
-function HullModel({ glbPath, build }: { glbPath: string; build: BuildOptions }) {
+function HullModel({
+  glbPath,
+  build,
+  onBoundsReady,
+}: {
+  glbPath: string;
+  build: BuildOptions;
+  onBoundsReady: (box: THREE.Box3) => void;
+}) {
   const { scene } = useGLTF(glbPath);
 
-  // Deep-clone once per GLB load so our color mutations are isolated
   const clonedScene = useMemo(
     () => cloneSceneWithMaterials(scene),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [glbPath, scene]
   );
 
-  // Re-apply colors whenever the build changes
-  useEffect(() => {
-    applyBuildColors(clonedScene, build);
-  }, [clonedScene, build]);
+  // Center the hull at origin on XZ and sit it on Y=0
+  const centeredScene = useMemo(() => {
+    const grp = new THREE.Group();
+    grp.add(clonedScene.clone ? clonedScene.clone() : clonedScene);
 
-  return <primitive object={clonedScene} />;
+    const raw = new THREE.Box3().setFromObject(grp);
+    const center = new THREE.Vector3();
+    raw.getCenter(center);
+    // Shift so hull center is at X=0, Z=0, and bottom sits at Y=0
+    grp.position.set(-center.x, -raw.min.y, -center.z);
+    return grp;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clonedScene]);
+
+  useEffect(() => {
+    applyBuildColors(centeredScene, build);
+  }, [centeredScene, build]);
+
+  // Notify parent of final bounds after positioning
+  const reported = useRef(false);
+  useEffect(() => {
+    if (!reported.current) {
+      reported.current = true;
+      const box = new THREE.Box3().setFromObject(centeredScene);
+      onBoundsReady(box);
+    }
+  }, [centeredScene, onBoundsReady]);
+
+  return <primitive object={centeredScene} />;
 }
 
-function AccessoryModel({ glbPath, position }: { glbPath: string; position?: [number, number, number] }) {
+/**
+ * Positions an accessory GLB relative to hull bounds.
+ * offset is a fraction of hull size: [xFrac, yFrac, zFrac]
+ * where 0.5 = center, negative z = bow, positive z = stern
+ */
+function PositionedModel({
+  glbPath,
+  hullBox,
+  xFrac,
+  yFrac,
+  zFrac,
+  scale,
+  colorHex,
+}: {
+  glbPath: string;
+  hullBox: THREE.Box3 | null;
+  /** Fraction along hull X [-0.5 .. 0.5] (0 = center) */
+  xFrac: number;
+  /** Fraction along hull Y [0 .. 1] (0 = keel, 1 = top) */
+  yFrac: number;
+  /** Fraction along hull Z [-0.5 .. 0.5] (negative = bow, positive = stern) */
+  zFrac: number;
+  scale?: number;
+  colorHex?: string;
+}) {
   const { scene } = useGLTF(glbPath);
-  const clone = useMemo(() => scene.clone(), [scene]);
+
+  const cloneWithMats = useMemo(() => cloneSceneWithMaterials(scene), [scene]);
+
+  // Measure accessory own bounds and center it
+  const centeredAccessory = useMemo(() => {
+    const grp = new THREE.Group();
+    const inner = cloneWithMats.clone ? cloneWithMats.clone() : cloneWithMats;
+    grp.add(inner);
+    if (scale && scale !== 1) grp.scale.setScalar(scale);
+    const rawBox = new THREE.Box3().setFromObject(grp);
+    const c = new THREE.Vector3();
+    rawBox.getCenter(c);
+    grp.position.set(-c.x, -rawBox.min.y, -c.z);
+    return grp;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloneWithMats, scale]);
+
+  useEffect(() => {
+    if (colorHex) {
+      centeredAccessory.traverse((child) => {
+        if (child instanceof THREE.Mesh) setMeshColor(child, colorHex);
+      });
+    }
+  }, [centeredAccessory, colorHex]);
+
+  // Compute world position based on hull bounds
+  const position = useMemo<[number, number, number]>(() => {
+    if (!hullBox) return [0, 0, 0];
+    const hullSize = new THREE.Vector3();
+    hullBox.getSize(hullSize);
+    const hullCenter = new THREE.Vector3();
+    hullBox.getCenter(hullCenter);
+
+    const x = hullCenter.x + xFrac * hullSize.x;
+    const y = hullBox.min.y + yFrac * hullSize.y;
+    const z = hullCenter.z + zFrac * hullSize.z;
+    return [x, y, z];
+  }, [hullBox, xFrac, yFrac, zFrac]);
+
   return (
-    <group position={position ?? [0, 0, 0]}>
-      <primitive object={clone} />
+    <group position={position}>
+      <primitive object={centeredAccessory} />
     </group>
   );
-}
-
-function EngineModel({ glbPath, color }: { glbPath: string; color: string }) {
-  const { scene } = useGLTF(glbPath);
-  const clone = useMemo(() => cloneSceneWithMaterials(scene), [scene]);
-
-  useEffect(() => {
-    const hex = resolveHex(color);
-    clone.traverse((child) => {
-      if (child instanceof THREE.Mesh) setMeshColor(child, hex);
-    });
-  }, [clone, color]);
-
-  return <primitive object={clone} />;
-}
-
-function ConsoleModel({ glbPath }: { glbPath: string }) {
-  const { scene } = useGLTF(glbPath);
-  const clone = useMemo(() => scene.clone(), [scene]);
-  return <primitive object={clone} />;
 }
 
 function SceneCamera() {
@@ -162,10 +246,6 @@ function SceneCamera() {
   return null;
 }
 
-/**
- * Bridges THREE.DefaultLoadingManager progress into React state.
- * Must live OUTSIDE <Suspense> so it renders even while assets are loading.
- */
 function LoadingBridge({ onProgress }: { onProgress: (active: boolean) => void }) {
   const { active } = useProgress();
   useEffect(() => {
@@ -174,7 +254,27 @@ function LoadingBridge({ onProgress }: { onProgress: (active: boolean) => void }
   return null;
 }
 
-// ─── Accessory registry ──────────────────────────────────────────────────────
+// ─── Accessory mount offsets (fractions of hull size) ───────────────────────
+//
+// These are tuned for H390/H420. Adjust per-boat if needed.
+//
+// xFrac: 0 = centerline
+// yFrac: 0 = keel, 1 = full height (deck)
+// zFrac: 0 = center, -0.5 = bow tip, +0.5 = stern tip
+//
+// Engine goes BEHIND the stern — zFrac > 0.5 to place it outside/aft
+
+interface MountPoint { xFrac: number; yFrac: number; zFrac: number; scale?: number; }
+
+const MOUNT_POINTS: Record<string, MountPoint> = {
+  engine:          { xFrac: 0,    yFrac: 0.15, zFrac:  0.62 },  // outside stern
+  console:         { xFrac: 0,    yFrac: 0.45, zFrac: -0.05 },  // center/fwd of midship
+  lightBarArch:    { xFrac: 0,    yFrac: 1.05, zFrac: -0.05 },  // over console
+  fishingRod:      { xFrac: 0.3,  yFrac: 0.80, zFrac:  0.30 },  // port stern quarter
+  telescopicLadder:{ xFrac: 0,    yFrac: 0.10, zFrac:  0.45 },  // transom exterior
+  fixedBimini:     { xFrac: 0,    yFrac: 1.10, zFrac: -0.05 },  // above console
+  FoldingBimini:   { xFrac: 0,    yFrac: 1.10, zFrac: -0.05 },
+};
 
 const ACCESSORY_GLBS: Record<string, string> = {
   lightBarArch:     '/models/lightBarArch.glb',
@@ -183,6 +283,84 @@ const ACCESSORY_GLBS: Record<string, string> = {
   fixedBimini:      '/models/fixedBimini.glb',
   FoldingBimini:    '/models/FoldingBimini.glb',
 };
+
+// ─── Scene inner component (has access to hullBox state) ─────────────────────
+
+function Scene({
+  build,
+  hullGlb,
+  consoleGlb,
+  engineGlb,
+}: {
+  build: BuildOptions;
+  hullGlb: string;
+  consoleGlb: string;
+  engineGlb: string;
+}) {
+  const hullBoxRef = useRef<THREE.Box3 | null>(null);
+  // Force re-render after hull bounds are set
+  const [hullBox, setHullBox] = useState<THREE.Box3 | null>(null);
+
+  const handleBoundsReady = useCallback((box: THREE.Box3) => {
+    hullBoxRef.current = box;
+    setHullBox(box);
+  }, []);
+
+  const engineColorHex = resolveHex(build.engineColor);
+
+  const consoleMnt  = MOUNT_POINTS.console;
+  const engineMnt   = MOUNT_POINTS.engine;
+
+  return (
+    <>
+      <HullModel glbPath={hullGlb} build={build} onBoundsReady={handleBoundsReady} />
+
+      {hullBox && (
+        <>
+          {/* Console */}
+          <PositionedModel
+            glbPath={consoleGlb}
+            hullBox={hullBox}
+            xFrac={consoleMnt.xFrac}
+            yFrac={consoleMnt.yFrac}
+            zFrac={consoleMnt.zFrac}
+          />
+
+          {/* Engine — mounts outside/aft of transom */}
+          <PositionedModel
+            glbPath={engineGlb}
+            hullBox={hullBox}
+            xFrac={engineMnt.xFrac}
+            yFrac={engineMnt.yFrac}
+            zFrac={engineMnt.zFrac}
+            colorHex={engineColorHex}
+          />
+
+          {/* Accessories */}
+          {build.accessories.map((accId) => {
+            const glb = ACCESSORY_GLBS[accId];
+            const mnt = MOUNT_POINTS[accId];
+            if (!glb || !mnt) return null;
+            return (
+              <PositionedModel
+                key={accId}
+                glbPath={glb}
+                hullBox={hullBox}
+                xFrac={mnt.xFrac}
+                yFrac={mnt.yFrac}
+                zFrac={mnt.zFrac}
+                scale={mnt.scale}
+              />
+            );
+          })}
+        </>
+      )}
+    </>
+  );
+}
+
+// useState import is needed inside Scene — pull it to the top
+import { useState } from 'react';
 
 // ─── Main export ─────────────────────────────────────────────────────────────
 
@@ -209,14 +387,10 @@ export default function BoatViewer({ build, hullGlb, consoleGlb, engineGlb, onLo
         camera={{ fov: 45, near: 0.1, far: 100 }}
       >
         <SceneCamera />
-
-        {/* Loading tracker — outside Suspense so it fires during asset fetch */}
         <LoadingBridge onProgress={handleProgress} />
 
         {/* ── Showroom lighting rig ───────────────────────────────────────── */}
-        {/* Strong ambient so no face is pure black */}
         <ambientLight intensity={3.0} />
-        {/* Key light — top-front-right */}
         <directionalLight
           position={[5, 8, 6]}
           intensity={5.0}
@@ -229,27 +403,21 @@ export default function BoatViewer({ build, hullGlb, consoleGlb, engineGlb, onLo
           shadow-camera-top={8}
           shadow-camera-bottom={-8}
         />
-        {/* Fill light — top-left-rear */}
         <directionalLight position={[-6, 5, -4]} intensity={2.5} />
-        {/* Rim / back light */}
         <directionalLight position={[0, 4, -9]} intensity={2.0} />
-        {/* Front fill — eye-level */}
         <directionalLight position={[0, 1, 9]} intensity={1.8} />
-        {/* Overhead point for top surfaces */}
         <pointLight position={[0, 7, 0]} intensity={3.0} color="#ffffff" distance={20} />
 
-        {/* ── 3D Models ──────────────────────────────────────────────────── */}
+        {/* ── Models ──────────────────────────────────────────────────────── */}
         <Suspense fallback={null}>
-          <HullModel glbPath={hullGlb} build={build} />
-          <ConsoleModel glbPath={consoleGlb} />
-          <EngineModel glbPath={engineGlb} color={build.engineColor} />
-          {build.accessories.map((accId) => {
-            const glb = ACCESSORY_GLBS[accId];
-            return glb ? <AccessoryModel key={accId} glbPath={glb} /> : null;
-          })}
+          <Scene
+            build={build}
+            hullGlb={hullGlb}
+            consoleGlb={consoleGlb}
+            engineGlb={engineGlb}
+          />
         </Suspense>
 
-        {/* Subtle shadow under the boat */}
         <ContactShadows
           position={[0, -0.5, 0]}
           opacity={0.5}

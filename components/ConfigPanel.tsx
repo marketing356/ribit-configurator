@@ -162,7 +162,7 @@ export default function ConfigPanel() {
       {/* Model Selection */}
       <Section title="Model">
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {BOAT_CONFIGS.map((boat) => (
+          {BOAT_CONFIGS.filter((b) => !b.hidden).map((boat) => (
             <button
               key={boat.id}
               onClick={() => setBoat(boat.id)}
