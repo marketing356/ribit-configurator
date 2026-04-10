@@ -168,6 +168,37 @@ export const BOAT_CONFIGS: BoatConfig[] = [
     },
     availableConsoles: CONSOLES,
   },
+  {
+    id: 'P600',
+    name: 'P600 Patrol',
+    size: '20ft',
+    type: 'classic',
+    description: 'Patrol Series — AI-generated preview model. 20ft tactical patrol RIB.',
+    hullGlb: '/models/patrol_p600_meshy.glb',
+    specs: {
+      length: '20 ft (6.0m)',
+      beam: '8.2 ft (2.5m)',
+      capacity: '10 persons / 2000 lbs',
+      weight: '900 lbs (hull)',
+      maxHP: '200 HP',
+    },
+    defaultOptions: {
+      boatId: 'P600',
+      consoleType: 'centerConsoleClassic',
+      powderCoat: 'gray',
+      evaColor: 'gray',
+      engineType: 'suzuki',
+      engineColor: 'black',
+      seatColorType: 'twoTone',
+      insideSeatColor: 'gray',
+      outsideSeatColor: 'navy',
+      tubeColor: 'black',
+      stripePattern: 1,
+      stripeColor: 'deepNavy',
+      accessories: [],
+    },
+    availableConsoles: CONSOLES,
+  },
 ];
 
 export function getBoatConfig(id: string): BoatConfig | undefined {
